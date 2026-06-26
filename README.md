@@ -30,7 +30,7 @@ A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, an
 The recommended location is `/opt/allmon3-netmap` — the standard path for self-contained third-party add-ons not managed by the distro package manager.
 
 ```bash
-sudo git clone https://github.com/youruser/allmon3-netmap /opt/allmon3-netmap
+sudo git clone https://github.com/JoshuaCarroll/allmon3-netmap /opt/allmon3-netmap
 ```
 
 ### 2. Run the installer
