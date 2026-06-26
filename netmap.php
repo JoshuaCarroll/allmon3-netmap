@@ -43,6 +43,7 @@ define('COORDS_INI',   '/etc/allmon3/netmap-nodelist.ini'); // per-node lat/lon 
 define('AMI_TIMEOUT',  10);    // seconds to wait for each AMI response
 define('FETCH_NODEDB', true);  // true → fall back to allmondb.allstarlink.org if astdb.txt is empty
 define('MAX_NODES',    1000);  // safety cap on total nodes returned
+define('QRZ_BATCH',    20);    // max QRZ lookups per request (remainder cached on next run)
 
 // ── HTTP headers ───────────────────────────────────────────────────────────────
 
@@ -453,26 +454,46 @@ function output_coords_template(array $result_nodes, array $coords): void
  * QRZ requires an active XML Data subscription for full lat/lon access.
  * See: https://www.qrz.com/docs/xml/current_spec.html
  */
-function qrz_login(string $user, string $pass): ?string
+function qrz_login(string $user, string $pass, string &$error = ''): ?string
 {
     $url = 'https://xmldata.qrz.com/xml/current/?'
          . 'username=' . urlencode($user) . ';'
          . 'password=' . urlencode($pass) . ';'
          . 'agent=allmon3-netmap/1.0';
 
-    $ctx = stream_context_create(['http' => ['timeout' => 10]]);
-    $raw = @file_get_contents($url, false, $ctx);
-    if (!$raw) {
+    $ctx     = stream_context_create(['http' => ['timeout' => 5]]);
+    $php_err = null;
+    set_error_handler(static function (int $no, string $str) use (&$php_err): bool {
+        $php_err = $str;
+        return true;
+    });
+    $raw = file_get_contents($url, false, $ctx);
+    restore_error_handler();
+
+    if ($raw === false) {
+        $error = 'QRZ network error: ' . ($php_err ?? 'unknown — check allow_url_fopen and SSL support');
         return null;
     }
 
     $xml = @simplexml_load_string($raw);
     if (!$xml) {
+        $error = 'QRZ login: could not parse XML response';
+        return null;
+    }
+
+    $api_error = trim((string) ($xml->Session->Error ?? ''));
+    if ($api_error !== '') {
+        $error = 'QRZ login: ' . $api_error;
         return null;
     }
 
     $key = trim((string) ($xml->Session->Key ?? ''));
-    return $key !== '' ? $key : null;
+    if ($key === '') {
+        $error = 'QRZ login: no session key returned — subscription may be required';
+        return null;
+    }
+
+    return $key;
 }
 
 /**
@@ -530,17 +551,23 @@ function qrz_fetch(string $callsign, string $key): array|false|null
  * appends all newly-found entries to COORDS_INI so future requests skip the
  * lookup.
  *
- * Does nothing (silently) when $qrz_user is blank (i.e. no [qrz] section in
- * netmap-settings.ini), when login fails, or when COORDS_INI is not writable
- * by the web server process.
+ * Returns an array of diagnostic strings (empty = no problems).  Errors are
+ * included in the JSON response so they are visible without digging through
+ * server logs.
+ *
+ * Lookups are capped at QRZ_BATCH per request to prevent PHP timeouts when
+ * many new nodes are discovered at once.  Remaining nodes are resolved on
+ * subsequent requests once earlier results are cached in COORDS_INI.
  *
  * Note: COORDS_INI must be group-writable (chmod 660) for appending to work.
  * The install.sh script sets this automatically.
  */
-function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $qrz_pass): void
+function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $qrz_pass): array
 {
+    $errs = [];
+
     if ($qrz_user === '') {
-        return;  // feature disabled — no [qrz] section in netmap-settings.ini
+        return $errs;  // feature disabled — no [qrz] section in netmap-settings.ini
     }
 
     // Collect nodes that have a known callsign but are still missing coordinates.
@@ -551,12 +578,20 @@ function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $
         }
     }
     if (empty($pending)) {
-        return;
+        return $errs;
     }
 
-    $key = qrz_login($qrz_user, $qrz_pass);
+    // Cap per-request lookups to stay within PHP's max_execution_time.
+    // Nodes resolved this run are written to COORDS_INI; the rest are handled
+    // on the next request.
+    $total_pending = count($pending);
+    $pending       = array_slice($pending, 0, QRZ_BATCH, true);
+
+    $login_error = '';
+    $key = qrz_login($qrz_user, $qrz_pass, $login_error);
     if (!$key) {
-        return;  // login failed — skip silently
+        $errs[] = $login_error;
+        return $errs;
     }
 
     $appended = [];  // nid_str => data for COORDS_INI append
@@ -566,8 +601,10 @@ function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $
 
         // One automatic re-login on session expiry.
         if ($coords === false) {
-            $key = qrz_login($qrz_user, $qrz_pass);
+            $relogin_error = '';
+            $key = qrz_login($qrz_user, $qrz_pass, $relogin_error);
             if (!$key) {
+                $errs[] = 'QRZ session re-login failed: ' . $relogin_error;
                 break;
             }
             $coords = qrz_fetch($callsign, $key);
@@ -589,25 +626,36 @@ function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $
         ];
     }
 
-    if (empty($appended) || !is_writable(COORDS_INI)) {
-        return;
+    if (!empty($appended)) {
+        if (!is_writable(COORDS_INI)) {
+            $errs[] = 'QRZ: found ' . count($appended) . ' coordinate(s) but cannot write to '
+                    . COORDS_INI . ' (chmod 660 required for www-data)';
+        } else {
+            $ts    = gmdate('Y-m-d H:i:s') . ' UTC';
+            $bar   = str_repeat('-', 40);
+            $block = "\n; -- Added by QRZ lookup {$ts} {$bar}\n";
+
+            foreach ($appended as $nid_str => $e) {
+                $tag   = $e['local'] ? 'local' : 'remote';
+                $block .= "\n[{$nid_str}]\n";
+                $block .= "; {$e['desc']}  [{$tag}][qrz]\n";
+                $block .= "lat = {$e['lat']}\n";
+                $block .= "lon = {$e['lon']}\n";
+                $block .= "; label =\n";
+            }
+
+            file_put_contents(COORDS_INI, $block, FILE_APPEND | LOCK_EX);
+        }
     }
 
-    // Append new entries to COORDS_INI.
-    $ts    = gmdate('Y-m-d H:i:s') . ' UTC';
-    $bar   = str_repeat('-', 40);
-    $block = "\n; -- Added by QRZ lookup {$ts} {$bar}\n";
-
-    foreach ($appended as $nid_str => $e) {
-        $tag   = $e['local'] ? 'local' : 'remote';
-        $block .= "\n[{$nid_str}]\n";
-        $block .= "; {$e['desc']}  [{$tag}][qrz]\n";
-        $block .= "lat = {$e['lat']}\n";
-        $block .= "lon = {$e['lon']}\n";
-        $block .= "; label =\n";
+    if ($total_pending > QRZ_BATCH) {
+        $errs[] = sprintf(
+            'QRZ: resolved %d/%d node(s) this request (batch limit QRZ_BATCH=%d); remainder cached on next run',
+            count($pending), $total_pending, QRZ_BATCH
+        );
     }
 
-    file_put_contents(COORDS_INI, $block, FILE_APPEND | LOCK_EX);
+    return $errs;
 }
 // ── Main ───────────────────────────────────────────────────────────────────────
 
@@ -731,7 +779,8 @@ foreach (array_keys($all_network_nodes) as $nid) {
 // aid and does not trigger network lookups (new coords appear there automatically
 // on the next run, since they have already been written to COORDS_INI).
 if (!isset($_GET['template'])) {
-    qrz_enrich_and_persist($result_nodes, $qrz_user, $qrz_pass);
+    $qrz_errors = qrz_enrich_and_persist($result_nodes, $qrz_user, $qrz_pass);
+    $errors     = array_merge($errors, $qrz_errors);
 }
 
 // ── Emit output ──────────────────────────────────────────────────────────────
