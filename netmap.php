@@ -3,7 +3,7 @@
  * netmap.php – AllStarLink Network Node Discovery
  *
  * HOW IT WORKS
- *   1. Reads /etc/allmon3/netmap-ami.ini for one or more Asterisk AMI servers, each
+ *   1. Reads /etc/allmon3/netmap-settings.ini for one or more Asterisk AMI servers, each
  *      with host, port, user, pass, and a comma-separated list of node numbers.
  *   2. Connects to each AMI server in turn and issues RptStatus XStat for
  *      every node listed under that server.
@@ -13,6 +13,10 @@
  *   5. Deduplicates, excludes private nodes (< 2000), and enriches each with
  *      metadata from /var/lib/asterisk/astdb.txt and optional lat/lon from
  *      /etc/allmon3/netmap-nodelist.ini.
+ *   6. For nodes still missing coordinates, looks them up on QRZ.com by
+ *      callsign (requires a [qrz] section in netmap-settings.ini).  Newly-found lat/lon
+ *      pairs are appended to netmap-nodelist.ini automatically so future
+ *      requests skip the lookup.
  *
  * KEY DESIGN NOTES
  *   • No recursive BFS needed – LinkedNodes already contains the full picture.
@@ -33,11 +37,11 @@
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 
-define('AMI_INI',      '/etc/allmon3/netmap-ami.ini');     // AMI servers + node lists
-define('ASTDB_PATH',   '/var/lib/asterisk/astdb.txt');   // node metadata flat file
+define('SETTINGS_INI', '/etc/allmon3/netmap-settings.ini'); // AMI servers, QRZ credentials
+define('ASTDB_PATH',   '/var/lib/asterisk/astdb.txt');      // node metadata flat file
 define('COORDS_INI',   '/etc/allmon3/netmap-nodelist.ini'); // per-node lat/lon overrides
 define('AMI_TIMEOUT',  10);    // seconds to wait for each AMI response
-define('FETCH_NODEDB', false); // true → fall back to allmondb.allstarlink.org if astdb.txt is empty
+define('FETCH_NODEDB', true);  // true → fall back to allmondb.allstarlink.org if astdb.txt is empty
 define('MAX_NODES',    1000);  // safety cap on total nodes returned
 
 // ── HTTP headers ───────────────────────────────────────────────────────────────
@@ -49,9 +53,10 @@ header('Access-Control-Allow-Origin: *');
 // ── Config parsers ─────────────────────────────────────────────────────────────
 
 /**
- * Parse /etc/allmon3/netmap-ami.ini and return an array of AMI server configs.
+ * Parse the AMI server sections from netmap-settings.ini and return an array of
+ * server configs.  The reserved [qrz] section is silently skipped.
  *
- * Each INI section defines one Asterisk AMI server.  Example:
+ * Each AMI section defines one Asterisk instance.  Example:
  *
  *   [my_repeater]
  *   host  = 127.0.0.1
@@ -77,6 +82,9 @@ function parse_ami_ini(string $path): array
     }
 
     foreach ($ini as $section => $cfg) {
+        if (strtolower($section) === 'qrz') {
+            continue;  // reserved for QRZ credentials — not an AMI server section
+        }
         $nodes = [];
         foreach (explode(',', $cfg['nodes'] ?? '') as $n) {
             $n = trim($n);
@@ -437,12 +445,178 @@ function output_coords_template(array $result_nodes, array $coords): void
         }
     }
 }
+// ── QRZ XML API helpers ──────────────────────────────────────────────────────
 
+/**
+ * Log in to the QRZ XML API and return a session key, or null on failure.
+ *
+ * QRZ requires an active XML Data subscription for full lat/lon access.
+ * See: https://www.qrz.com/docs/xml/current_spec.html
+ */
+function qrz_login(string $user, string $pass): ?string
+{
+    $url = 'https://xmldata.qrz.com/xml/current/?'
+         . 'username=' . urlencode($user) . ';'
+         . 'password=' . urlencode($pass) . ';'
+         . 'agent=allmon3-netmap/1.0';
+
+    $ctx = stream_context_create(['http' => ['timeout' => 10]]);
+    $raw = @file_get_contents($url, false, $ctx);
+    if (!$raw) {
+        return null;
+    }
+
+    $xml = @simplexml_load_string($raw);
+    if (!$xml) {
+        return null;
+    }
+
+    $key = trim((string) ($xml->Session->Key ?? ''));
+    return $key !== '' ? $key : null;
+}
+
+/**
+ * Fetch lat/lon for a callsign from the QRZ XML API.
+ *
+ * Returns ['lat' => float, 'lon' => float] on success.
+ * Returns false  when the session key has expired (caller should re-login).
+ * Returns null   when the callsign is not found or a network error occurred.
+ */
+function qrz_fetch(string $callsign, string $key): array|false|null
+{
+    $url = 'https://xmldata.qrz.com/xml/current/?'
+         . 's='        . urlencode($key)      . ';'
+         . 'callsign=' . urlencode($callsign);
+
+    $ctx = stream_context_create(['http' => ['timeout' => 10]]);
+    $raw = @file_get_contents($url, false, $ctx);
+    if (!$raw) {
+        return null;
+    }
+
+    $xml = @simplexml_load_string($raw);
+    if (!$xml) {
+        return null;
+    }
+
+    // A missing <Key> in the Session node signals session expiry.
+    $session_key = trim((string) ($xml->Session->Key ?? ''));
+    if ($session_key === '') {
+        return false;  // expired — caller should re-login
+    }
+
+    // Any <Error> in the session means the lookup failed (not found, etc.).
+    $error = trim((string) ($xml->Session->Error ?? ''));
+    if ($error !== '') {
+        return null;
+    }
+
+    if (!isset($xml->Callsign)) {
+        return null;
+    }
+
+    $lat = trim((string) ($xml->Callsign->lat ?? ''));
+    $lon = trim((string) ($xml->Callsign->lon ?? ''));
+    if ($lat === '' || $lon === '') {
+        return null;
+    }
+
+    return ['lat' => (float) $lat, 'lon' => (float) $lon];
+}
+
+/**
+ * For every node in $result_nodes that has a known callsign but no lat/lon,
+ * look up its coordinates on QRZ.com.  Updates $result_nodes in place and
+ * appends all newly-found entries to COORDS_INI so future requests skip the
+ * lookup.
+ *
+ * Does nothing (silently) when $qrz_user is blank (i.e. no [qrz] section in
+ * netmap-settings.ini), when login fails, or when COORDS_INI is not writable
+ * by the web server process.
+ *
+ * Note: COORDS_INI must be group-writable (chmod 660) for appending to work.
+ * The install.sh script sets this automatically.
+ */
+function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $qrz_pass): void
+{
+    if ($qrz_user === '') {
+        return;  // feature disabled — no [qrz] section in netmap-settings.ini
+    }
+
+    // Collect nodes that have a known callsign but are still missing coordinates.
+    $pending = [];  // nid_str => callsign
+    foreach ($result_nodes as $nid_str => $entry) {
+        if ($entry['callsign'] !== null && $entry['lat'] === null && $entry['lon'] === null) {
+            $pending[$nid_str] = $entry['callsign'];
+        }
+    }
+    if (empty($pending)) {
+        return;
+    }
+
+    $key = qrz_login($qrz_user, $qrz_pass);
+    if (!$key) {
+        return;  // login failed — skip silently
+    }
+
+    $appended = [];  // nid_str => data for COORDS_INI append
+
+    foreach ($pending as $nid_str => $callsign) {
+        $coords = qrz_fetch($callsign, $key);
+
+        // One automatic re-login on session expiry.
+        if ($coords === false) {
+            $key = qrz_login($qrz_user, $qrz_pass);
+            if (!$key) {
+                break;
+            }
+            $coords = qrz_fetch($callsign, $key);
+        }
+
+        if (!is_array($coords)) {
+            continue;  // not found or error — leave lat/lon null
+        }
+
+        // Update the in-memory result so this response reflects the new coords.
+        $result_nodes[$nid_str]['lat'] = $coords['lat'];
+        $result_nodes[$nid_str]['lon'] = $coords['lon'];
+
+        $appended[$nid_str] = [
+            'desc'  => $result_nodes[$nid_str]['desc']  ?? '',
+            'local' => $result_nodes[$nid_str]['local'] ?? false,
+            'lat'   => $coords['lat'],
+            'lon'   => $coords['lon'],
+        ];
+    }
+
+    if (empty($appended) || !is_writable(COORDS_INI)) {
+        return;
+    }
+
+    // Append new entries to COORDS_INI.
+    $ts    = gmdate('Y-m-d H:i:s') . ' UTC';
+    $bar   = str_repeat('-', 40);
+    $block = "\n; -- Added by QRZ lookup {$ts} {$bar}\n";
+
+    foreach ($appended as $nid_str => $e) {
+        $tag   = $e['local'] ? 'local' : 'remote';
+        $block .= "\n[{$nid_str}]\n";
+        $block .= "; {$e['desc']}  [{$tag}][qrz]\n";
+        $block .= "lat = {$e['lat']}\n";
+        $block .= "lon = {$e['lon']}\n";
+        $block .= "; label =\n";
+    }
+
+    file_put_contents(COORDS_INI, $block, FILE_APPEND | LOCK_EX);
+}
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-$servers = parse_ami_ini(AMI_INI);
-$nodedb  = load_local_nodedb(ASTDB_PATH);
-$coords  = load_coords(COORDS_INI);
+$raw_settings = @parse_ini_file(SETTINGS_INI, true, INI_SCANNER_RAW) ?: [];
+$qrz_user     = trim($raw_settings['qrz']['user'] ?? '');
+$qrz_pass     = trim($raw_settings['qrz']['pass'] ?? '');
+$servers      = parse_ami_ini(SETTINGS_INI);
+$nodedb       = load_local_nodedb(ASTDB_PATH);
+$coords       = load_coords(COORDS_INI);
 
 if (empty($nodedb) && FETCH_NODEDB) {
     $nodedb = fetch_remote_nodedb();
@@ -450,7 +624,7 @@ if (empty($nodedb) && FETCH_NODEDB) {
 
 if (empty($servers)) {
     http_response_code(500);
-    echo json_encode(['error' => 'No AMI servers configured in ' . AMI_INI]);
+    echo json_encode(['error' => 'No AMI servers configured in ' . SETTINGS_INI]);
     exit;
 }
 
@@ -463,7 +637,7 @@ $errors            = [];  // non-fatal per-server errors reported in the respons
 foreach ($servers as $server_name => $server) {
 
     if (empty($server['user']) || empty($server['pass'])) {
-        $errors[] = "[$server_name] missing user or pass in " . AMI_INI;
+        $errors[] = "[$server_name] missing user or pass in " . SETTINGS_INI;
         continue;
     }
 
@@ -550,6 +724,14 @@ foreach (array_keys($all_network_nodes) as $nid) {
     ];
     apply_coords($entry, $nid_str, $coords);
     $result_nodes[$nid_str] = $entry;
+}
+
+// ── QRZ coordinate enrichment ─────────────────────────────────────────────────
+// Only runs on normal JSON requests; the ?template endpoint is a manual-edit
+// aid and does not trigger network lookups (new coords appear there automatically
+// on the next run, since they have already been written to COORDS_INI).
+if (!isset($_GET['template'])) {
+    qrz_enrich_and_persist($result_nodes, $qrz_user, $qrz_pass);
 }
 
 // ── Emit output ──────────────────────────────────────────────────────────────

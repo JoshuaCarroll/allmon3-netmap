@@ -49,7 +49,7 @@ echo "NOTE: The following config files were NOT removed because they may"
 echo "      contain your credentials and custom data:"
 echo
 
-for conf_file in netmap-ami.ini netmap-nodelist.ini; do
+for conf_file in netmap-settings.ini netmap-nodelist.ini; do
     target="${CONF_DIR}/${conf_file}"
     if [[ -e "${target}" ]]; then
         echo "      ${target}"
@@ -58,7 +58,7 @@ done
 
 echo
 echo "To delete them manually:"
-echo "  sudo rm ${CONF_DIR}/netmap-ami.ini"
+echo "  sudo rm ${CONF_DIR}/netmap-settings.ini"
 echo "  sudo rm ${CONF_DIR}/netmap-nodelist.ini"
 
 # ── Done ─────────────────────────────────────────────────────────────────────

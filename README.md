@@ -6,7 +6,7 @@ A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, an
 
 ## How It Works
 
-1. Reads `/etc/allmon3/netmap-ami.ini` for one or more Asterisk AMI servers, each with a list of locally-hosted node numbers.
+1. Reads `/etc/allmon3/netmap-settings.ini` for one or more Asterisk AMI servers, each with a list of locally-hosted node numbers.
 2. Connects to each AMI server and issues an `RptStatus XStat` command for every listed node.
 3. Parses the `LinkedNodes:` field from each response, which contains the **full transitive set** of all reachable nodes — no recursive graph traversal needed.
 4. Merges results from all servers into a single deduplicated JSON object.
@@ -41,26 +41,32 @@ sudo bash /opt/allmon3-netmap/install.sh
 
 The installer:
 - Creates a symlink `/usr/share/allmon3/netmap.php` → `/opt/allmon3-netmap/netmap.php`. Because it is a symlink, Allmon3 package upgrades will not overwrite it, and re-running the installer recreates the link if it is ever removed.
-- Copies `netmap-ami.ini` and `netmap-nodelist.ini` template files to `/etc/allmon3/` **only if they do not already exist**, so your edits are never overwritten.
+- Copies `netmap-settings.ini` and `netmap-nodelist.ini` template files to `/etc/allmon3/` **only if they do not already exist**, so your edits are never overwritten.
 
-### 3. Configure AMI access
+### 3. Configure settings
 
-Edit `/etc/allmon3/netmap-ami.ini` and set your AMI credentials and node numbers:
+Edit `/etc/allmon3/netmap-settings.ini` to set your AMI credentials and (optionally) QRZ.com credentials for automatic coordinate lookup:
 
 ```ini
+; ── Asterisk AMI server ───────────────────────────────────────────────────────
 [local]
 host  = 127.0.0.1
 port  = 5038
 user  = admin
 pass  = your-ami-secret
 nodes = 499600
+
+; ── QRZ.com coordinate lookup (optional — leave blank to disable) ──────────
+[qrz]
+user = your-qrz-username
+pass = your-qrz-password
 ```
 
 The file must be readable by the web server user:
 
 ```bash
-sudo chmod 640 /etc/allmon3/netmap-ami.ini
-sudo chown root:www-data /etc/allmon3/netmap-ami.ini
+sudo chmod 640 /etc/allmon3/netmap-settings.ini
+sudo chown root:www-data /etc/allmon3/netmap-settings.ini
 ```
 
 Multiple AMI servers are supported — add additional `[section]` blocks for each Asterisk instance.
@@ -138,7 +144,7 @@ sudo bash /opt/allmon3-netmap/uninstall.sh
 The uninstaller removes the symlink from `/usr/share/allmon3/` but **does not delete** your config files in `/etc/allmon3/`. Those contain your credentials and coordinate data and must be removed manually if desired:
 
 ```bash
-sudo rm /etc/allmon3/netmap-ami.ini
+sudo rm /etc/allmon3/netmap-settings.ini
 sudo rm /etc/allmon3/netmap-nodelist.ini
 ```
 
@@ -147,7 +153,7 @@ sudo rm /etc/allmon3/netmap-nodelist.ini
 ```
 /opt/allmon3-netmap/          ← repo clone
 ├── netmap.php                ← the API endpoint (symlinked into Allmon3)
-├── netmap-ami.ini            ← config template (copied once to /etc/allmon3/)
+├── netmap-settings.ini       ← settings template (copied once to /etc/allmon3/)
 ├── netmap-nodelist.ini       ← coordinates template (copied once to /etc/allmon3/)
 ├── install.sh
 └── uninstall.sh
@@ -156,7 +162,7 @@ sudo rm /etc/allmon3/netmap-nodelist.ini
 └── netmap.php  →  /opt/allmon3-netmap/netmap.php   (symlink)
 
 /etc/allmon3/
-├── netmap-ami.ini            ← your live AMI credentials (never overwritten)
+├── netmap-settings.ini       ← your live AMI + QRZ credentials (never overwritten)
 └── netmap-nodelist.ini       ← your live coordinate data (never overwritten)
 ```
 
