@@ -5,7 +5,7 @@
 #   1. Creates a symlink  ALLMON_WEB/netmap.php  → this repo's netmap.php
 #      (symlink approach means Allmon3 package upgrades leave the file untouched,
 #       and re-running this script silently recreates the link if it was removed)
-#   2. Copies ami.ini and node-coords.ini to CONF_DIR only when the target file
+#   2. Copies netmap-ami.ini and netmap-nodelist.ini to CONF_DIR only when the target file
 #      does not already exist (never overwrites user edits)
 #
 # Usage:
@@ -60,7 +60,7 @@ echo "    OK"
 # ── Step 2: Copy config templates (copy-once; never overwrite) ───────────────
 mkdir -p "${CONF_DIR}"
 
-for conf_file in ami.ini node-coords.ini; do
+for conf_file in netmap-ami.ini netmap-nodelist.ini; do
     src="${SCRIPT_DIR}/${conf_file}"
     dst="${CONF_DIR}/${conf_file}"
 
@@ -86,7 +86,7 @@ echo
 echo "Installation complete."
 echo
 echo "Next steps:"
-echo "  1. Edit ${CONF_DIR}/ami.ini  — set your AMI host, user, pass, and nodes."
-echo "  2. Edit ${CONF_DIR}/node-coords.ini  — add lat/lon for any nodes you want"
+echo "  1. Edit ${CONF_DIR}/netmap-ami.ini  — set your AMI host, user, pass, and nodes."
+echo "  2. Edit ${CONF_DIR}/netmap-nodelist.ini  — add lat/lon for any nodes you want"
 echo "     to appear on the map."
 echo "  3. Verify the endpoint:  curl http://localhost/allmon3/netmap.php"

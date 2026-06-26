@@ -6,13 +6,13 @@ A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, an
 
 ## How It Works
 
-1. Reads `/etc/allmon3/ami.ini` for one or more Asterisk AMI servers, each with a list of locally-hosted node numbers.
+1. Reads `/etc/allmon3/netmap-ami.ini` for one or more Asterisk AMI servers, each with a list of locally-hosted node numbers.
 2. Connects to each AMI server and issues an `RptStatus XStat` command for every listed node.
 3. Parses the `LinkedNodes:` field from each response, which contains the **full transitive set** of all reachable nodes — no recursive graph traversal needed.
 4. Merges results from all servers into a single deduplicated JSON object.
 5. Filters out private nodes (number < 2000) and enriches each entry with:
    - Call sign and description from `/var/lib/asterisk/astdb.txt`
-   - Optional lat/lon and label overrides from `/etc/allmon3/node-coords.ini`
+   - Optional lat/lon and label overrides from `/etc/allmon3/netmap-nodelist.ini`
 
 ## Requirements
 
@@ -41,11 +41,11 @@ sudo bash /opt/allmon3-netmap/install.sh
 
 The installer:
 - Creates a symlink `/usr/share/allmon3/netmap.php` → `/opt/allmon3-netmap/netmap.php`. Because it is a symlink, Allmon3 package upgrades will not overwrite it, and re-running the installer recreates the link if it is ever removed.
-- Copies `ami.ini` and `node-coords.ini` template files to `/etc/allmon3/` **only if they do not already exist**, so your edits are never overwritten.
+- Copies `netmap-ami.ini` and `netmap-nodelist.ini` template files to `/etc/allmon3/` **only if they do not already exist**, so your edits are never overwritten.
 
 ### 3. Configure AMI access
 
-Edit `/etc/allmon3/ami.ini` and set your AMI credentials and node numbers:
+Edit `/etc/allmon3/netmap-ami.ini` and set your AMI credentials and node numbers:
 
 ```ini
 [local]
@@ -59,15 +59,15 @@ nodes = 499600
 The file must be readable by the web server user:
 
 ```bash
-sudo chmod 640 /etc/allmon3/ami.ini
-sudo chown root:www-data /etc/allmon3/ami.ini
+sudo chmod 640 /etc/allmon3/netmap-ami.ini
+sudo chown root:www-data /etc/allmon3/netmap-ami.ini
 ```
 
 Multiple AMI servers are supported — add additional `[section]` blocks for each Asterisk instance.
 
 ### 4. (Optional) Add node coordinates
 
-Edit `/etc/allmon3/node-coords.ini` to add lat/lon for any nodes you want to display on a map. You can generate a pre-populated template from the live network by hitting the `?template=1` endpoint (see [API](#api) below), then saving the output to `/etc/allmon3/node-coords.ini`.
+Edit `/etc/allmon3/netmap-nodelist.ini` to add lat/lon for any nodes you want to display on a map. You can generate a pre-populated template from the live network by hitting the `?template=1` endpoint (see [API](#api) below), then saving the output to `/etc/allmon3/netmap-nodelist.ini`.
 
 ```ini
 [499600]
@@ -90,7 +90,7 @@ All requests are `GET`. The endpoint is served from Allmon3's web root.
 |---|---|
 | `/allmon3/netmap.php` | Returns the full node map as JSON |
 | `/allmon3/netmap.php?pretty=1` | Same, with human-readable indentation |
-| `/allmon3/netmap.php?template=1` | Returns a `node-coords.ini` template pre-populated with all currently discovered nodes. Nodes that already have coordinates in the live config are pre-filled. |
+| `/allmon3/netmap.php?template=1` | Returns a `netmap-nodelist.ini` template pre-populated with all currently discovered nodes. Nodes that already have coordinates in the live config are pre-filled. |
 
 ### JSON Response Format
 
@@ -138,8 +138,8 @@ sudo bash /opt/allmon3-netmap/uninstall.sh
 The uninstaller removes the symlink from `/usr/share/allmon3/` but **does not delete** your config files in `/etc/allmon3/`. Those contain your credentials and coordinate data and must be removed manually if desired:
 
 ```bash
-sudo rm /etc/allmon3/ami.ini
-sudo rm /etc/allmon3/node-coords.ini
+sudo rm /etc/allmon3/netmap-ami.ini
+sudo rm /etc/allmon3/netmap-nodelist.ini
 ```
 
 ## File Layout
@@ -147,8 +147,8 @@ sudo rm /etc/allmon3/node-coords.ini
 ```
 /opt/allmon3-netmap/          ← repo clone
 ├── netmap.php                ← the API endpoint (symlinked into Allmon3)
-├── ami.ini                   ← config template (copied once to /etc/allmon3/)
-├── node-coords.ini           ← coordinates template (copied once to /etc/allmon3/)
+├── netmap-ami.ini            ← config template (copied once to /etc/allmon3/)
+├── netmap-nodelist.ini       ← coordinates template (copied once to /etc/allmon3/)
 ├── install.sh
 └── uninstall.sh
 
@@ -156,8 +156,8 @@ sudo rm /etc/allmon3/node-coords.ini
 └── netmap.php  →  /opt/allmon3-netmap/netmap.php   (symlink)
 
 /etc/allmon3/
-├── ami.ini                   ← your live AMI credentials (never overwritten)
-└── node-coords.ini           ← your live coordinate data (never overwritten)
+├── netmap-ami.ini            ← your live AMI credentials (never overwritten)
+└── netmap-nodelist.ini       ← your live coordinate data (never overwritten)
 ```
 
 ## License
