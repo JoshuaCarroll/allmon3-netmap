@@ -311,11 +311,12 @@ function ami_read_block(mixed $sock, float $deadline): string
  * Parse an RptStatus XStat response.
  *
  * LinkedNodes: line contains the FULL transitive set of nodes reachable through
- * this node.  Prefix T/R/C/U is stripped; callsign-based entries (EchoLink,
- * phone portals) and private nodes (< 2000) are filtered out.
+ * this node.  Prefix T/R/C/U is stripped; private nodes (< 2000) are filtered
+ * out.  Callsign-based entries (EchoLink, phone portals) are collected into
+ * linked_echolink for separate processing.
  *
  * Returns an array with keys: node, txkeyed, txekeyed, rxkeyed, numlinks,
- *   uptime, reloadtime, linked_nodes (internal).
+ *   uptime, reloadtime, linked_nodes (internal), linked_echolink (internal).
  */
 function parse_xstat(string $resp, int $node): array
 {
@@ -327,7 +328,8 @@ function parse_xstat(string $resp, int $node): array
         'numlinks'     => 0,
         'uptime'       => -1,
         'reloadtime'   => -1,
-        'linked_nodes' => [],  // internal – removed before output
+        'linked_nodes'    => [],  // internal – removed before output
+        'linked_echolink' => [],  // internal – removed before output
     ];
 
     foreach (preg_split('/[\r\n]+/', $resp) as $line) {
@@ -348,6 +350,13 @@ function parse_xstat(string $resp, int $node): array
                 $nid = $m[1];
                 if (is_numeric($nid) && (int) $nid >= 2000) {
                     $entry['linked_nodes'][(int) $nid] = true;
+                } elseif (!is_numeric($nid)) {
+                    // Callsign-based entry (EchoLink link, repeater, phone portal, etc.)
+                    // Strip the EchoLink suffix (-L, -R, -P, -B) to get the base callsign.
+                    $base = strtoupper(preg_replace('/-[LRPBlrpb]$/i', '', $nid));
+                    if (strlen($base) >= 3) {
+                        $entry['linked_echolink'][$base] = true;
+                    }
                 }
             }
             continue;
@@ -410,15 +419,22 @@ function output_coords_template(array $result_nodes, array $coords): void
         }
     }
 
-    $sort_fn = static function (array $a, array $b) use ($coords): int {
-        $nid_a = (string) $a['node'];
-        $nid_b = (string) $b['node'];
-        $has_a = isset($coords[$nid_a]['lat']) && $coords[$nid_a]['lat'] !== '';
-        $has_b = isset($coords[$nid_b]['lat']) && $coords[$nid_b]['lat'] !== '';
+    $sort_fn = static function (array $a, array $b): int {
+        $has_a = $a['lat'] !== null;
+        $has_b = $b['lat'] !== null;
         if ($has_a !== $has_b) {
             return $has_a ? 1 : -1;  // no-coords first
         }
-        return $a['node'] <=> $b['node'];  // then numeric ascending
+        // ASL nodes (integer IDs) sort numerically; EchoLink nodes sort by callsign
+        $a_is_asl = ($a['type'] ?? 'asl') === 'asl';
+        $b_is_asl = ($b['type'] ?? 'asl') === 'asl';
+        if ($a_is_asl && $b_is_asl) {
+            return $a['node'] <=> $b['node'];  // numeric ascending
+        }
+        if (!$a_is_asl && !$b_is_asl) {
+            return strcmp($a['callsign'] ?? '', $b['callsign'] ?? '');  // alphabetically
+        }
+        return $a_is_asl ? -1 : 1;  // ASL nodes before EchoLink
     };
 
     uasort($local_nodes,  $sort_fn);
@@ -684,9 +700,10 @@ if (empty($servers)) {
 
 // ── Query each AMI server ─────────────────────────────────────────────────────
 
-$result_nodes      = [];  // nid_string => node entry  (merged across all servers)
-$all_network_nodes = [];  // nid_int    => true         (union of every LinkedNodes list)
-$errors            = [];  // non-fatal per-server errors reported in the response
+$result_nodes       = [];  // nid_string => node entry  (merged across all servers)
+$all_network_nodes  = [];  // nid_int    => true         (union of every LinkedNodes list)
+$all_echolink_nodes = [];  // base_callsign => true      (EchoLink stations via LinkedNodes)
+$errors             = [];  // non-fatal per-server errors reported in the response
 
 foreach ($servers as $server_name => $server) {
 
@@ -731,14 +748,18 @@ foreach ($servers as $server_name => $server) {
         $entry['callsign'] = $d['callsign'];
         $entry['desc']     = $d['desc'];
         $entry['local']    = true;
+        $entry['type']     = 'asl';
 
         // Accumulate the full network list from this node's LinkedNodes
         foreach (array_keys($entry['linked_nodes']) as $linked_nid) {
             $all_network_nodes[$linked_nid] = true;
         }
+        foreach (array_keys($entry['linked_echolink']) as $el_callsign) {
+            $all_echolink_nodes[$el_callsign] = true;
+        }
 
-        // linked_nodes is internal – do not expose in output
-        unset($entry['linked_nodes']);
+        // linked_nodes and linked_echolink are internal – do not expose in output
+        unset($entry['linked_nodes'], $entry['linked_echolink']);
 
         apply_coords($entry, $nid_str, $coords);
 
@@ -773,11 +794,36 @@ foreach (array_keys($all_network_nodes) as $nid) {
         'callsign' => $d['callsign'],
         'desc'     => $d['desc'],
         'local'    => false,
+        'type'     => 'asl',
         'lat'      => null,
         'lon'      => null,
     ];
     apply_coords($entry, $nid_str, $coords);
     $result_nodes[$nid_str] = $entry;
+}
+
+// ── Add EchoLink nodes discovered through LinkedNodes ─────────────────────────
+
+foreach (array_keys($all_echolink_nodes) as $el_callsign) {
+    if (isset($result_nodes[$el_callsign])) {
+        continue;  // already present as an ASL node whose callsign matches
+    }
+    if (count($result_nodes) >= MAX_NODES) {
+        $truncated = true;
+        break;
+    }
+
+    $entry = [
+        'node'     => $el_callsign,  // no numeric ASL ID; callsign used as node identifier
+        'callsign' => $el_callsign,
+        'desc'     => $el_callsign,  // QRZ lookup or label= in nodelist can override
+        'local'    => false,
+        'type'     => 'echolink',
+        'lat'      => null,
+        'lon'      => null,
+    ];
+    apply_coords($entry, $el_callsign, $coords);
+    $result_nodes[$el_callsign] = $entry;
 }
 
 // ── QRZ coordinate enrichment ─────────────────────────────────────────────────
