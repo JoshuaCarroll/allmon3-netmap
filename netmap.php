@@ -570,6 +570,12 @@ function qrz_enrich_and_persist(array &$result_nodes, string $qrz_user, string $
         return $errs;  // feature disabled — no [qrz] section in netmap-settings.ini
     }
 
+    if (!function_exists('simplexml_load_string')) {
+        $errs[] = 'QRZ disabled: the php-xml extension is not installed '
+                . '(run: sudo apt install php-xml && sudo systemctl restart apache2)';
+        return $errs;
+    }
+
     // Collect nodes that have a known callsign but are still missing coordinates.
     $pending = [];  // nid_str => callsign
     foreach ($result_nodes as $nid_str => $entry) {
