@@ -1,8 +1,8 @@
 # allmon3-netmap
 
-Lightweight PHP add-on for [Allmon3](https://github.com/AllStarLink/Allmon3) that queries the Asterisk AMI and returns a flat JSON map of every node reachable through the linked AllStarLink network — local nodes with live keyed state, remote nodes with description and optional lat/lon coordinates.
+Lightweight PHP add-on for [Allmon3](https://github.com/AllStarLink/Allmon3) that queries the Asterisk AMI and returns a map of every node reachable through the linked AllStarLink network — local nodes with live keyed state, remote nodes with description and optional lat/lon coordinates.
 
-A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, and coordinate lookup. It is designed as a data source for network map visualizations but is useful for any application that needs a live picture of the node network.
+A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, and coordinate lookup. Output can be consumed as **JSON** (the default) or **KML** for direct import into Google Earth, Google Maps, or any GIS tool that speaks KML.
 
 ## How It Works
 
@@ -96,6 +96,7 @@ All requests are `GET`. The endpoint is served from Allmon3's web root.
 |---|---|
 | `/allmon3/netmap.php` | Returns the full node map as JSON |
 | `/allmon3/netmap.php?pretty=1` | Same, with human-readable indentation |
+| `/allmon3/netmap.php?format=kml` | Returns the node map as a KML document (Google Earth / Google Maps) |
 | `/allmon3/netmap.php?template=1` | Returns a `netmap-nodelist.ini` template pre-populated with all currently discovered nodes. Nodes that already have coordinates in the live config are pre-filled. |
 
 ### JSON Response Format
@@ -126,6 +127,20 @@ All requests are `GET`. The endpoint is served from Allmon3's web root.
 ```
 
 `local: true` indicates the node was directly queried via AMI (lives on one of your configured servers). Remote nodes discovered through `LinkedNodes:` carry live key state only when they happen to be listed on another configured server; otherwise key state fields are absent.
+
+### KML Output (`?format=kml`)
+
+Returns a standard [KML 2.2](https://www.ogc.org/standard/kml/) document suitable for Google Earth, Google Maps (`My Maps > Import`), QGIS, and any other KML-capable tool.
+
+- Only nodes that have **both `lat` and `lon`** are emitted as Placemarks; nodes without coordinates are silently omitted.
+- Each Placemark's info balloon shows the callsign, node number, description, and whether the node is local or remote.
+- Three icon styles distinguish node categories:
+
+| Style | Color | Meaning |
+|---|---|---|
+| `local-asl` | Blue | Node directly queried via AMI |
+| `remote-asl` | Green | Node discovered through `LinkedNodes:` |
+| `echolink` | Yellow | EchoLink / phone-portal node |
 
 ## Updating
 
