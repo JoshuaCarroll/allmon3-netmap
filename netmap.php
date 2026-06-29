@@ -33,6 +33,7 @@
  *   http://<pi>/allmon3/netmap.php
  *   http://<pi>/allmon3/netmap.php?pretty=1
  *   http://<pi>/allmon3/netmap.php?format=kml   ← KML (Google Earth / Google Maps)
+ *   http://<pi>/allmon3/netmap.php?format=geojson   ← GeoJSON (GIS / mapping tools)
  *   http://<pi>/allmon3/netmap.php?template=1   ← netmap-nodelist.ini template
  */
 
@@ -545,6 +546,72 @@ function output_kml(array $result_nodes, bool $truncated): void
     echo "</kml>\n";
 }
 
+/**
+ * Output the node list as GeoJSON.
+ * Only nodes that have both lat and lon are emitted as Features.
+ * Triggered by the ?format=geojson query parameter.
+ */
+function output_geojson(array $result_nodes, bool $truncated, array $errors = []): void
+{
+    header('Content-Type: application/geo+json; charset=utf-8');
+    header('Content-Disposition: inline; filename="netmap.geojson"');
+
+    $features = [];
+    foreach ($result_nodes as $entry) {
+        if ($entry['lat'] === null || $entry['lon'] === null) {
+            continue;
+        }
+
+        $properties = [
+            'node'      => $entry['node'],
+            'callsign'  => $entry['callsign'],
+            'desc'      => $entry['desc'] ?? '',
+            'local'     => !empty($entry['local']),
+            'type'      => $entry['type'] ?? 'asl',
+            'lat'       => $entry['lat'],
+            'lon'       => $entry['lon'],
+        ];
+
+        foreach (['txkeyed', 'txekeyed', 'rxkeyed', 'numlinks', 'uptime', 'reloadtime'] as $key) {
+            if (array_key_exists($key, $entry)) {
+                $properties[$key] = $entry[$key];
+            }
+        }
+
+        $features[] = [
+            'type'       => 'Feature',
+            'geometry'   => [
+                'type'        => 'Point',
+                'coordinates' => [$entry['lon'], $entry['lat']],
+            ],
+            'properties' => $properties,
+        ];
+    }
+
+    $output = [
+        'type'     => 'FeatureCollection',
+        'features' => $features,
+        'total'    => count($features),
+    ];
+
+    if (!empty($errors)) {
+        $output['errors'] = $errors;
+    }
+    if ($truncated) {
+        $output['truncated'] = true;
+        $output['note'] = sprintf(
+            'Result capped at MAX_NODES (%d). Increase MAX_NODES in netmap.php to see more.',
+            MAX_NODES
+        );
+    }
+
+    $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
+    if (isset($_GET['pretty'])) {
+        $flags |= JSON_PRETTY_PRINT;
+    }
+    echo json_encode($output, $flags);
+}
+
 // ── QRZ XML API helpers ──────────────────────────────────────────────────────
 
 /**
@@ -924,6 +991,8 @@ if (isset($_GET['template'])) {
     output_coords_template($result_nodes, $coords);
 } elseif (isset($_GET['format']) && strtolower(trim($_GET['format'])) === 'kml') {
     output_kml($result_nodes, $truncated);
+} elseif (isset($_GET['format']) && strtolower(trim($_GET['format'])) === 'geojson') {
+    output_geojson($result_nodes, $truncated, $errors);
 } else {
     $output = [
         'nodes'     => $result_nodes,

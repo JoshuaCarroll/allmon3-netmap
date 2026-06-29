@@ -97,6 +97,7 @@ All requests are `GET`. The endpoint is served from Allmon3's web root.
 | `/allmon3/netmap.php` | Returns the full node map as JSON |
 | `/allmon3/netmap.php?pretty=1` | Same, with human-readable indentation |
 | `/allmon3/netmap.php?format=kml` | Returns the node map as a KML document (Google Earth / Google Maps) |
+| `/allmon3/netmap.php?format=geojson` | Returns the node map as GeoJSON for GIS tools and modern map viewers |
 | `/allmon3/netmap.php?template=1` | Returns a `netmap-nodelist.ini` template pre-populated with all currently discovered nodes. Nodes that already have coordinates in the live config are pre-filled. |
 
 ### JSON Response Format
