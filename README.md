@@ -2,7 +2,7 @@
 
 Lightweight PHP add-on for [Allmon3](https://github.com/AllStarLink/Allmon3) that queries the Asterisk AMI and returns a map of every node reachable through the linked AllStarLink network — local nodes with live keyed state, remote nodes with description and optional lat/lon coordinates.
 
-A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, and coordinate lookup. Output can be consumed as **JSON** (the default) or **KML** for direct import into Google Earth, Google Maps, or any GIS tool that speaks KML.
+A single endpoint (`netmap.php`) handles node discovery, metadata enrichment, and coordinate lookup. Output can be consumed as **JSON** (the default), **GeoJSON** for those mapping APIs that are very smart, or **KML** for direct import into Google Earth, Google Maps, or any GIS tool that speaks KML.
 
 ## How It Works
 
